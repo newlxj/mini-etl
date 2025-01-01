@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/go-mysql-org/go-mysql/canal"
+	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/siddontang/go-log/log"
 )
@@ -22,6 +24,11 @@ type RowData struct {
 	TableName string        `json:"table_name"`
 	Columns   []string      `json:"columns"`
 	Rows      []interface{} `json:"rows"`
+}
+
+type BinlogPosition struct {
+	Name string `json:"name"`
+	Pos  uint32 `json:"pos"`
 }
 
 func flattenRows(rows [][]interface{}) []interface{} {
@@ -60,6 +67,7 @@ func (h *MyEventHandler) OnRow(e *canal.RowsEvent) error {
 	log.Infof("%s", string(data))
 	return nil
 }
+
 func getColumnNames(table *schema.Table) []string {
 	var columnNames []string
 	for _, col := range table.Columns {
@@ -72,26 +80,58 @@ func (h *MyEventHandler) String() string {
 	return "MyEventHandler"
 }
 
-func (h *MyEventHandler) ReadAndClear() (string, error) {
+func (h *MyEventHandler) ReadAndClear(filename string) (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.file.Close()
 
-	data, err := os.ReadFile("abc.txt")
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return "", err
 	}
 
-	if err := os.WriteFile("abc.txt", []byte{}, 0644); err != nil {
+	if err := os.WriteFile(filename, []byte{}, 0644); err != nil {
 		return "", err
 	}
 
-	h.file, err = os.OpenFile("abc.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	h.file, err = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return "", err
 	}
 
 	return string(data), nil
+}
+
+func saveBinlogPosition(pos mysql.Position) error {
+	data, err := json.Marshal(BinlogPosition{Name: pos.Name, Pos: pos.Pos})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile("binlog_position.json", data, 0644)
+}
+
+func loadBinlogPosition() (mysql.Position, error) {
+	data, err := os.ReadFile("binlog_position.json")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return mysql.Position{}, nil
+		}
+		return mysql.Position{}, err
+	}
+	var pos BinlogPosition
+	if err := json.Unmarshal(data, &pos); err != nil {
+		return mysql.Position{}, err
+	}
+	return mysql.Position{Name: pos.Name, Pos: pos.Pos}, nil
+}
+
+func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, gtid mysql.GTIDSet, force bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := saveBinlogPosition(pos); err != nil {
+		return err
+	}
+	return nil
 }
 
 func main() {
@@ -103,36 +143,46 @@ func main() {
 	cfg.Dump.Tables = []string{"users"}
 	cfg.Dump.ExecutionPath = "" // Disable mysqldump
 
-	c, err := canal.NewCanal(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	handler, err := NewMyEventHandler("abc.txt")
+	filename := cfg.User + "-" + cfg.Dump.TableDB + "-" + cfg.Dump.Tables[0] + ".blog"
+	handler, err := NewMyEventHandler(filename)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer handler.file.Close()
 
-	c.SetEventHandler(handler)
-
+	// Start the HTTP server in a separate goroutine
 	go func() {
-		if err := c.Run(); err != nil {
+		http.HandleFunc("/consume", func(w http.ResponseWriter, r *http.Request) {
+			data, err := handler.ReadAndClear(filename)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Write([]byte(data))
+		})
+
+		log.Info("Server is running on :8080")
+		if err := http.ListenAndServe(":8080", nil); err != nil {
 			log.Fatal(err)
 		}
 	}()
 
-	http.HandleFunc("/consume", func(w http.ResponseWriter, r *http.Request) {
-		data, err := handler.ReadAndClear()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Write([]byte(data))
-	})
+	c, err := canal.NewCanal(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	log.Info("Server is running on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	c.SetEventHandler(handler)
+
+	pos, err := loadBinlogPosition()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if pos.Name != "" {
+		c.RunFrom(pos)
+	}
+
+	if err := c.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
