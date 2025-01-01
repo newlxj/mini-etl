@@ -1,0 +1,15 @@
+[
+    {
+        "taskName": "test",
+        "taskAccount": "root",
+        "taskDB": "chat",
+        "taskTable": "users",
+        "client": {
+            "dbType": "mysql",
+            "dbUrl": "127.0.0.1:3306",
+            "dbName":"bchat",
+            "dbUsername": "root",
+            "dbPassword": "123456"
+        }
+    }
+]

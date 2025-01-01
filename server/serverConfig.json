@@ -1,0 +1,14 @@
+[
+    {
+        "dbType": "mysql",
+        "dbUrl": "127.0.0.1:3306",
+        "dbUsername": "root",
+        "dbPassword": "123456",
+        "dbDBs": [
+            "chat"
+        ],
+        "dataDelete": true,
+        "dataUpdate": true,
+        "dataInsert": true
+    }
+]
