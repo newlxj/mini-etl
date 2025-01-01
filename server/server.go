@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/go-mysql-org/go-mysql/canal"
@@ -125,16 +126,16 @@ func (h *MyEventHandler) ReadAndClear(filename string) (string, error) {
 	return string(data), nil
 }
 
-func saveBinlogPosition(pos mysql.Position) error {
+func saveBinlogPosition(pos mysql.Position, filename string) error {
 	data, err := json.Marshal(BinlogPosition{Name: pos.Name, Pos: pos.Pos})
 	if err != nil {
 		return err
 	}
-	return os.WriteFile("binlog_position.json", data, 0644)
+	return os.WriteFile(filename, data, 0644)
 }
 
-func loadBinlogPosition() (mysql.Position, error) {
-	data, err := os.ReadFile("binlog_position.json")
+func loadBinlogPosition(filename string) (mysql.Position, error) {
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return mysql.Position{}, nil
@@ -151,7 +152,8 @@ func loadBinlogPosition() (mysql.Position, error) {
 func (h *MyEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, gtid mysql.GTIDSet, force bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if err := saveBinlogPosition(pos); err != nil {
+	filename := h.file.Name()[:strings.LastIndex(h.file.Name(), "-")] + "-binlog_position.json"
+	if err := saveBinlogPosition(pos, filename); err != nil {
 		return err
 	}
 	return nil
@@ -220,7 +222,8 @@ func main() {
 
 	c.SetEventHandler(handler)
 
-	pos, err := loadBinlogPosition()
+	posFilename := cfg.User + "-binlog_position.json"
+	pos, err := loadBinlogPosition(posFilename)
 	if err != nil {
 		log.Fatal(err)
 	}
